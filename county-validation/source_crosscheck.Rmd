@@ -1,0 +1,245 @@
+---
+title: "Data Sources Cross-check"
+author: "Sihan Mao"
+date: "3/31/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+library(readr)
+library(tidyr)
+library(dplyr)
+library(stringr)
+```
+
+<br/><br/>
+
+# Loading NY Times, USAfact, JHU data
+
+```{r}
+## load data
+### long
+times_county <- read.csv(url("https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-counties.csv"), na.strings=c(""," ","NA")) %>%
+  filter(!is.na(fips))
+
+times_state <- read.csv(url("https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-states.csv"), na.strings=c(""," ","NA")) %>%
+  filter(date == "2020-03-28")
+
+### reshape Times 
+### long to wide
+times_county_wide <- reshape(times_county, idvar = c("fips", "county", "state"), timevar = "date", direction = "wide") %>%
+  unite(county_state, county, state, remove = FALSE)
+
+
+### wide
+usafact_confirm <- read.csv("covid_confirmed_usafacts.csv") %>%
+  filter(countyFIPS != 0) %>%
+  unite(county_state, County.Name, State, remove = FALSE)
+
+usafact_death <- read.csv("covid_deaths_usafacts.csv") %>%
+  filter(countyFIPS != 0) %>%
+  unite(county_state, County.Name, State, remove = FALSE)
+
+### wide
+jhu_county <- read.csv(url("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/03-28-2020.csv"), na.strings=c(""," ","NA")) %>%
+  filter(Country_Region == "US", !is.na(Admin2), !is.na(FIPS)) %>%
+  unite(county_state, Admin2, Province_State, remove = FALSE)
+
+jhu_ts <- read.csv(url("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_US.csv"), na.strings=c(""," ","NA"))
+```
+
+<br/><br/>
+
+***
+# Check Unique Identifier
+
+```{r}
+## Helper Function
+check_duplicate <- function(dataset, column) {
+  dup <- sum(duplicated(dataset[[column]]))
+  return(dup)
+}
+```
+
+```{r}
+### Times 
+check_duplicate(times_county_wide, "fips")
+check_duplicate(times_county_wide, "county_state")
+```
+
+```{r}
+### USAfact
+check_duplicate(usafact_confirm, "countyFIPS")
+check_duplicate(usafact_confirm, "county_state")
+check_duplicate(usafact_death, "countyFIPS")
+check_duplicate(usafact_death, "county_state")
+
+usafact_death[duplicated(usafact_death$county_state), ]
+usafact_death <- usafact_death[!duplicated(usafact_death$county_state), ]
+```
+
+```{r}
+### JHU
+check_duplicate(jhu_county, "FIPS")
+check_duplicate(jhu_county, "county_state")
+```
+
+<br/><br/>
+
+# Focus on March 28th
+
+## NYT
+
+```{r}
+times_county_28 <- times_county %>%
+  filter(date == "2020-03-28")
+
+times_county_wide_28 <- 
+  reshape(times_county_28, idvar = c("fips", "county", "state"), timevar = "date", direction = "wide") %>%
+  unite(county_state, county, state, remove = FALSE) %>%
+  rename(case = `cases.2020-03-28`,
+         death = `deaths.2020-03-28`)
+
+colnames(times_county_wide_28) <- paste("nyt", colnames(times_county_wide_28), sep = "_")
+```
+
+## USAFact
+
+```{r}
+usafact_death_28 <- usafact_death %>%
+  select(countyFIPS, County.Name, county_state, State, stateFIPS, X3.28.2020) %>%
+  rename(county = `County.Name`,
+         fips = `countyFIPS`,
+         state = `State`,
+         statefips = `stateFIPS`,
+         death = `X3.28.2020`)
+
+usafact_confirm_28 <- usafact_confirm %>%
+  select(countyFIPS, County.Name, county_state, State, stateFIPS, X3.28.20) %>%
+  rename(county = `County.Name`,
+         fips = `countyFIPS`,
+         state = `State`,
+         statefips = `stateFIPS`,
+         case = `X3.28.20`)
+
+usafact <- usafact_confirm_28 %>% 
+  select(fips, case) %>%
+  left_join(usafact_death_28, by = 'fips')
+
+colnames(usafact) <- paste("usa", colnames(usafact), sep = "_")
+```
+
+## JHU
+
+```{r}
+jhu_county_28 <- jhu_county %>%
+  select(FIPS, county_state, Admin2, Province_State, Confirmed, Deaths) %>%
+  rename(county = `Admin2`,
+         fips = `FIPS`,
+         state = `Province_State`,
+         case = `Confirmed`,
+         death = `Deaths`)
+
+colnames(jhu_county_28) <- paste("jhu", colnames(jhu_county_28), sep = "_")
+```
+
+## Merge 3 datasets by Counties 
+
+```{r}
+merged <- usafact %>%
+  left_join(jhu_county_28, by = c("usa_fips" = "jhu_fips")) %>%
+  left_join(times_county_wide_28, by = c("usa_fips" = "nyt_fips")) %>% 
+  filter(!is.na(jhu_county)) %>% ## delete Wade Hampton Census Area and Grand Princess Cruise Ship
+  mutate(nyt_county = as.character(nyt_county),
+         nyt_county_state = as.character(nyt_county_state),
+         nyt_state = as.character(nyt_state))
+```
+
+```{r}
+summary(merged)
+```
+
+
+
+```{r}
+merged %>% head(5)
+```
+<br/>
+
+## Cross-check   
+
+```{r}
+merged$nyt_case[is.na(merged$nyt_case)] <- 0
+merged$nyt_death[is.na(merged$nyt_death)] <- 0
+merged$usa_death[is.na(merged$usa_death)] <- 0
+merged$jhu_death[is.na(merged$jhu_death)] <- 0
+merged$nyt_county[is.na(merged$nyt_county)] <- " "
+merged$nyt_county_state[is.na(merged$nyt_county_state)] <- " "
+merged$nyt_state[is.na(merged$nyt_state)] <- " "
+
+cross_check <- merged %>%  
+  mutate(
+    usa_county = str_remove(usa_county, " County"),
+    county_match_usa_jhu = ifelse(usa_county == jhu_county, TRUE, FALSE),
+    county_match_usa_nyt = ifelse(usa_county == nyt_county, TRUE, FALSE),
+    county_match_jhu_nyt = ifelse(jhu_county == nyt_county, TRUE, FALSE),
+    case_match_usa_jhu = ifelse(usa_case == jhu_case, TRUE, FALSE),
+    case_match_usa_nyt = ifelse(usa_case == nyt_case, TRUE, FALSE),
+    case_match_jhu_nyt = ifelse(jhu_case == nyt_case, TRUE, FALSE),
+    death_match_usa_jhu = ifelse(usa_death == jhu_death, TRUE, FALSE),
+    death_match_usa_nyt = ifelse(usa_death == nyt_death, TRUE, FALSE),
+    death_match_jhu_nyt = ifelse(jhu_death == nyt_death, TRUE, FALSE)
+    )
+```
+<br/><br/>
+
+### Check Confirmed Cases
+```{r}
+cross_check %>% 
+  group_by(case_match_jhu_nyt, case_match_usa_nyt, case_match_usa_jhu) %>%
+  summarise(count = n())
+```
+<br/><br/>
+
+### Check Death Counts
+```{r}
+cross_check %>% 
+  group_by(death_match_jhu_nyt, death_match_usa_nyt, death_match_usa_jhu) %>%
+  summarise(count = n())
+```
+<br/><br/>
+
+### Check County Names
+```{r}
+cross_check %>% 
+  group_by(county_match_jhu_nyt, county_match_usa_nyt, county_match_usa_jhu) %>%
+  summarise(count = n())
+
+```
+  
+<br/><br/>
+
+***
+# Preliminary Results
+
+**For the 3142 counties and county-equivalents, FIPS is the unique identifier.**
+
+* **JHU** data has 3142 rows with records of 3142 counties and county-equivalents(3142 rows).
+
+* **USAFact** data has 3144 rows with records of 3142 counties and county-equivalents, plus *Wade Hampton Census Area*(fips 2270) and *Grand Princess Cruise Ship*.
+
+* **NY Times** data has 1868 rows with records 1868 counties and county-equivalents by March 28th.  
+<br/><br/>
+
+> County Merging
+
+NY Times only published counties with any confirmed or death COVID19 cases. JHU and USAFact published all 3142 counties. 1779 counties matched across all three sources. 1228 counties matched between USAFact and JHU. There are **135**(51+25+59=135) counties and county-equivalents like areas, cities or boroughs need cleaning. 
+
+<br/>
+
+> Numbers
+
+For counts of confirmed cases, **2632** out of 3142 matched perfertly(matched between each pair) across three sources. The number rises to **3008** for counts of deaths. 
